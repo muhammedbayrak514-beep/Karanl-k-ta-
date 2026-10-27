@@ -28,8 +28,7 @@ jobs:
           ZIP_FILE="Karanlik_Tac_v0.15.0_Entegre_5_Sistem.zip"
 
           if [ ! -f "$ZIP_FILE" ]; then
-            echo "::error::ZIP dosyasi depo ana dizininde bulunamadi: $ZIP_FILE"
-            echo "Depodaki dosyalar:"
+            echo "::error::ZIP bulunamadi: $ZIP_FILE"
             ls -la
             exit 1
           fi
@@ -41,14 +40,13 @@ jobs:
 
           if [ -z "$PROJECT_FILE" ]; then
             echo "::error::ZIP icinde project.godot bulunamadi."
-            find extracted -maxdepth 3 -type f | head -100
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$PROJECT_FILE")"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Godot projesi bulundu: $PROJECT_DIR"
+          echo "Proje bulundu: $PROJECT_DIR"
           ls -la "$PROJECT_DIR"
 
       - name: Godot 4.7.2 kur
@@ -75,7 +73,7 @@ jobs:
           sudo install -m 0755 "$GODOT_BIN" /usr/local/bin/godot
           godot --version
 
-      - name: Android doku ayarini duzelt
+      - name: Android ETC2 ASTC ayarini etkinlestir
         shell: bash
         run: |
           set -euo pipefail
@@ -85,21 +83,18 @@ jobs:
           import re
           from pathlib import Path
 
-          project_file = Path(os.environ["PROJECT_DIR"]) / "project.godot"
-          content = project_file.read_text(encoding="utf-8")
-          lines = content.splitlines()
-
-          section = "[rendering]"
+          project = Path(os.environ["PROJECT_DIR"]) / "project.godot"
+          lines = project.read_text(encoding="utf-8").splitlines()
           setting = "textures/vram_compression/import_etc2_astc"
 
           start = next(
               (i for i, line in enumerate(lines)
-               if line.strip() == section),
+               if line.strip() == "[rendering]"),
               None
           )
 
           if start is None:
-              lines.extend(["", section, setting + "=true"])
+              lines.extend(["", "[rendering]", setting + "=true"])
           else:
               end = next(
                   (i for i in range(start + 1, len(lines))
@@ -120,23 +115,21 @@ jobs:
               if not found:
                   lines.insert(end, setting + "=true")
 
-          project_file.write_text(
+          project.write_text(
               "\n".join(lines) + "\n",
               encoding="utf-8"
           )
 
-          print("Android ETC2/ASTC ayari etkinlestirildi.")
-          print("Ayar:", setting, "= true")
+          print("ETC2/ASTC etkinlestirildi.")
           PY
 
-          grep -n "import_etc2_astc" "$PROJECT_DIR/project.godot"
-
-      - name: Android export sablonlarini indir
+      - name: Android export sablonlarini kur
         shell: bash
         run: |
           set -euo pipefail
 
           VERSION="4.7.2-stable"
+          TEMPLATE_VERSION="4.7.2.stable"
           BASE="https://github.com/godotengine/godot-builds/releases/download/${VERSION}"
 
           curl -fL --retry 3 \
@@ -146,13 +139,34 @@ jobs:
           mkdir -p templates-unpacked
           unzip -q templates.tpz -d templates-unpacked
 
-          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${VERSION}"
-
+          # Dikkat: Godot klasor adi tireli degil, noktalidir.
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${TEMPLATE_VERSION}"
           mkdir -p "$TEMPLATE_DIR"
-          cp -R templates-unpacked/templates/. "$TEMPLATE_DIR/"
 
-          test -f "$TEMPLATE_DIR/android_debug.apk"
-          echo "Android export sablonlari hazir."
+          DEBUG_TEMPLATE="$(find templates-unpacked -type f -name android_debug.apk -print -quit)"
+          RELEASE_TEMPLATE="$(find templates-unpacked -type f -name android_release.apk -print -quit)"
+          SOURCE_TEMPLATE="$(find templates-unpacked -type f -name android_source.zip -print -quit)"
+
+          if [ -z "$DEBUG_TEMPLATE" ] || [ -z "$RELEASE_TEMPLATE" ]; then
+            echo "::error::Android debug/release export sablonlari ZIP icinde bulunamadi."
+            find templates-unpacked -type f | head -100
+            exit 1
+          fi
+
+          cp "$DEBUG_TEMPLATE" "$TEMPLATE_DIR/android_debug.apk"
+          cp "$RELEASE_TEMPLATE" "$TEMPLATE_DIR/android_release.apk"
+
+          if [ -n "$SOURCE_TEMPLATE" ]; then
+            cp "$SOURCE_TEMPLATE" "$TEMPLATE_DIR/android_source.zip"
+          fi
+
+          printf '%s\n' "$TEMPLATE_VERSION" > "$TEMPLATE_DIR/version.txt"
+
+          echo "Kurulan sablonlar:"
+          ls -lh "$TEMPLATE_DIR"
+
+          test -s "$TEMPLATE_DIR/android_debug.apk"
+          test -s "$TEMPLATE_DIR/android_release.apk"
 
       - name: Android export preset kontrolu
         shell: bash
@@ -161,13 +175,12 @@ jobs:
           cd "$PROJECT_DIR"
 
           if [ ! -f export_presets.cfg ]; then
-            echo "::error::export_presets.cfg bulunamadi. Projede Android export preset'i olusturulmamis."
+            echo "::error::export_presets.cfg bulunamadi."
             exit 1
           fi
 
           if ! grep -q 'name="Android"' export_presets.cfg; then
-            echo "::error::export_presets.cfg icinde adi Android olan preset bulunamadi."
-            echo "Mevcut preset adlari:"
+            echo "::error::Adi Android olan export preset'i bulunamadi."
             grep 'name=' export_presets.cfg || true
             exit 1
           fi
@@ -197,11 +210,11 @@ jobs:
             2>&1 | tee "$GITHUB_WORKSPACE/godot-export.log"
 
           if [ ! -s build/KaranlikTac-debug.apk ]; then
-            echo "::error::APK olusmadi veya dosya bos."
+            echo "::error::APK olusturulamadi."
             exit 1
           fi
 
-          echo "APK basariyla olusturuldu."
+          echo "APK olustu:"
           ls -lh build/KaranlikTac-debug.apk
 
       - name: APK dosyasini yukle
