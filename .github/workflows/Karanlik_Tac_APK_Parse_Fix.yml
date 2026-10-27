@@ -1,11 +1,11 @@
 
-name: Karanlik Tac - APK Parse Fix
+name: Karanlik Tac - Android APK
 
 on:
   workflow_dispatch:
     inputs:
       project_zip:
-        description: "Duzeltilmis proje ZIP dosyasinin adi"
+        description: "Oyun projesinin ZIP dosya adi"
         required: true
         default: "Karanlik_Tac_APK_Parse_Fix.zip"
         type: string
@@ -23,15 +23,21 @@ env:
 
 jobs:
   build-apk:
-    name: Godot kontrolu ve Android APK
+    name: Godot kontrol ve APK derleme
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
-      - name: Depoyu indir
+      - name: GitHub deposunu indir
         uses: actions/checkout@v4
 
-      - name: Proje ZIP dosyasini bul ve cikar
+      - name: Java 17 kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Proje ZIP dosyasini bul ve ac
         env:
           REQUESTED_PROJECT_ZIP: ${{ inputs.project_zip }}
         shell: bash
@@ -42,7 +48,7 @@ jobs:
 
           if [ ! -f "$ZIP_PATH" ]; then
             echo "::error::ZIP bulunamadi: $ZIP_PATH"
-            find . -maxdepth 1 -type f -iname '*.zip'
+            find . -maxdepth 2 -type f -iname '*.zip'
             exit 1
           fi
 
@@ -53,7 +59,7 @@ jobs:
             -type f -name project.godot -print -quit)"
 
           if [ -z "$PROJECT_FILE" ]; then
-            echo "::error::ZIP icinde project.godot yok"
+            echo "::error::ZIP icinde project.godot bulunamadi."
             exit 1
           fi
 
@@ -62,25 +68,19 @@ jobs:
 
           test -f "$PROJECT_DIR/export_presets.cfg"
           test -f "$PROJECT_DIR/scripts/game.gd"
-          test -f "$PROJECT_DIR/scripts/siege_manager.gd"
 
-      - name: Java 17 kur
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Godot ve export sablonlarini kur
+      - name: Godot motorunu indir
         shell: bash
         run: |
           set -euo pipefail
 
           BASE="https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}"
 
-          curl -fL --retry 3 --retry-all-errors \
+          curl -fL --retry 3 \
             "$BASE/Godot_v${GODOT_VERSION}_linux.x86_64.zip" \
             -o godot.zip
 
+          mkdir -p godot-bin
           unzip -q godot.zip -d godot-bin
 
           GODOT_BIN="$(find godot-bin -type f \
@@ -89,40 +89,63 @@ jobs:
           test -n "$GODOT_BIN"
           sudo install -m 0755 "$GODOT_BIN" /usr/local/bin/godot
 
-          curl -fL --retry 3 --retry-all-errors \
+          curl -fL --retry 3 \
             "$BASE/Godot_v${GODOT_VERSION}_export_templates.tpz" \
             -o templates.tpz
 
-          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_VERSION}"
           mkdir -p templates
           unzip -q templates.tpz -d templates
 
-          cp -R templates/templates/. \
-            "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_VERSION}/"
+          TEMPLATE_SOURCE="$(find templates -type f \
+            -name android_debug.apk -print -quit)"
 
-          test -s "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_VERSION}/android_debug.apk"
+          if [ -z "$TEMPLATE_SOURCE" ]; then
+            echo "::error::Android export sablonu bulunamadi."
+            exit 1
+          fi
 
-          echo "JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_VERSION}"
+          mkdir -p "$TEMPLATE_DIR"
+          cp -R "$(dirname "$TEMPLATE_SOURCE")/." "$TEMPLATE_DIR/"
+
           godot --version
 
-      - name: GDScript parse ve proje kontrolu
+      - name: Android SDK kur
+        uses: android-actions/setup-android@v3
+
+      - name: Android SDK yolunu ayarla
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.config/godot"
+
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          EOF
+
+      - name: GDScript ve proje kontrolu
         shell: bash
         run: |
           set -euo pipefail
 
           set +e
           godot --headless --editor \
-            --path "$PROJECT_DIR" --quit 2>&1 | tee godot-import.log
+            --path "$PROJECT_DIR" --quit 2>&1 | tee godot-check.log
           STATUS=${PIPESTATUS[0]}
           set -e
 
           if [ "$STATUS" -ne 0 ] || \
-            grep -Eiq 'SCRIPT ERROR:|Parse Error:|Failed to load script|Failed loading resource' godot-import.log; then
-            echo "::error::Godot kaynak kontrolu basarisiz. APK uretilmedi."
+            grep -Eiq 'SCRIPT ERROR:|Parse Error:|Failed to load script|Failed loading resource' godot-check.log; then
+            echo "::error::GDScript kontrolu basarisiz. APK uretilmedi."
             exit 1
           fi
 
-      - name: Oyun baslangic testi
+      - name: Oyunu baslatma kontrolu
         shell: bash
         run: |
           set -euo pipefail
@@ -135,7 +158,7 @@ jobs:
 
           if [ "$STATUS" -ne 0 ] || \
             grep -Eiq 'SCRIPT ERROR:|Parse Error:|Failed to load script|Failed loading resource' godot-startup.log; then
-            echo "::error::Oyun baslangic testi basarisiz."
+            echo "::error::Oyun baslangic kontrolu basarisiz."
             exit 1
           fi
 
@@ -151,17 +174,18 @@ jobs:
             "$GITHUB_WORKSPACE/build/KaranlikTac-debug.apk" \
             2>&1 | tee godot-export.log
 
-          test -s build/KaranlikTac-debug.apk
-          unzip -t build/KaranlikTac-debug.apk | tail -n 2
-          sha256sum build/KaranlikTac-debug.apk > build/apk-sha256.txt
+          test -s "$GITHUB_WORKSPACE/build/KaranlikTac-debug.apk"
+          unzip -t "$GITHUB_WORKSPACE/build/KaranlikTac-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/build/KaranlikTac-debug.apk" \
+            > "$GITHUB_WORKSPACE/build/apk-sha256.txt"
 
-      - name: Hata gunluklerini yukle
+      - name: Hata gunluklerini kaydet
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Karanlik-Tac-build-diagnostics
           path: |
-            godot-import.log
+            godot-check.log
             godot-startup.log
             godot-export.log
           if-no-files-found: ignore
@@ -172,6 +196,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Karanlik-Tac-Android-APK
-          path: build/KaranlikTac-debug.apk
+          path: |
+            build/KaranlikTac-debug.apk
+            build/apk-sha256.txt
           if-no-files-found: error
           retention-days: 14
