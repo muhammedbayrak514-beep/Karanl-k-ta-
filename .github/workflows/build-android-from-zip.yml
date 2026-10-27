@@ -1,1 +1,130 @@
 
+name: Karanlik Tac - ZIP'ten Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Depoyu indir
+        uses: actions/checkout@v4
+
+      - name: ZIP dosyasini bul ve cikar
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="Karanlik_Tac_v0.15.0_Entegre_5_Sistem.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "HATA: ZIP dosyasi depo ana dizininde bulunamadi."
+            ls -la
+            exit 1
+          fi
+
+          mkdir -p extracted
+          unzip -q "$ZIP_FILE" -d extracted
+
+          PROJECT_FILE="$(find extracted -type f -name project.godot -print -quit)"
+
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "HATA: ZIP icinde project.godot bulunamadi."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT_FILE")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Proje bulundu: $PROJECT_DIR"
+
+      - name: Godot 4.7.2 kur
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="4.7.2-stable"
+          BASE="https://github.com/godotengine/godot-builds/releases/download/${VERSION}"
+
+          curl -fL --retry 3 \
+            "${BASE}/Godot_v${VERSION}_linux.x86_64.zip" \
+            -o godot.zip
+
+          unzip -q godot.zip -d godot-bin
+
+          sudo install -m 0755 \
+            "godot-bin/Godot_v${VERSION}_linux.x86_64" \
+            /usr/local/bin/godot
+
+          godot --version
+
+      - name: Android export sablonlarini kur
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="4.7.2-stable"
+          BASE="https://github.com/godotengine/godot-builds/releases/download/${VERSION}"
+
+          curl -fL --retry 3 \
+            "${BASE}/Godot_v${VERSION}_export_templates.tpz" \
+            -o templates.tpz
+
+          mkdir -p "$HOME/.local/share/godot/export_templates/4.7.2.stable"
+          mkdir templates-unpacked
+
+          unzip -q templates.tpz -d templates-unpacked
+
+          cp -R templates-unpacked/templates/. \
+            "$HOME/.local/share/godot/export_templates/4.7.2.stable/"
+
+      - name: Projeyi ice aktar
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          godot --headless --editor --path . --quit \
+            2>&1 | tee "$GITHUB_WORKSPACE/godot-import.log"
+
+      - name: Android APK olustur
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          mkdir -p build
+
+          godot --headless --path . \
+            --export-debug "Android" \
+            build/KaranlikTac-debug.apk
+
+          test -s build/KaranlikTac-debug.apk
+
+      - name: APK dosyasini yayinla
+        uses: actions/upload-artifact@v4
+        with:
+          name: Karanlik-Tac-Android-APK
+          path: ${{ env.PROJECT_DIR }}/build/KaranlikTac-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Hata kayitlarini yukle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Karanlik-Tac-Hata-Kayitlari
+          path: godot-import.log
+          if-no-files-found: ignore
+          retention-days: 7
+
