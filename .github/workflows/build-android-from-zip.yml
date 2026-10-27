@@ -1,5 +1,5 @@
 
-name: Karanlik Tac - ZIP'ten Android APK
+name: Karanlik Tac - Android APK Build
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ permissions:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
       - name: Depoyu indir
@@ -28,7 +28,8 @@ jobs:
           ZIP_FILE="Karanlik_Tac_v0.15.0_Entegre_5_Sistem.zip"
 
           if [ ! -f "$ZIP_FILE" ]; then
-            echo "HATA: ZIP dosyasi depo ana dizininde bulunamadi."
+            echo "::error::ZIP dosyasi depo ana dizininde bulunamadi: $ZIP_FILE"
+            echo "Depodaki dosyalar:"
             ls -la
             exit 1
           fi
@@ -39,14 +40,16 @@ jobs:
           PROJECT_FILE="$(find extracted -type f -name project.godot -print -quit)"
 
           if [ -z "$PROJECT_FILE" ]; then
-            echo "HATA: ZIP icinde project.godot bulunamadi."
+            echo "::error::ZIP icinde project.godot bulunamadi."
+            find extracted -maxdepth 3 -type f | head -100
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$PROJECT_FILE")"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Proje bulundu: $PROJECT_DIR"
+          echo "Godot projesi bulundu: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
 
       - name: Godot 4.7.2 kur
         shell: bash
@@ -62,13 +65,73 @@ jobs:
 
           unzip -q godot.zip -d godot-bin
 
-          sudo install -m 0755 \
-            "godot-bin/Godot_v${VERSION}_linux.x86_64" \
-            /usr/local/bin/godot
+          GODOT_BIN="$(find godot-bin -type f -name 'Godot_v*_linux.x86_64' -print -quit)"
 
+          if [ -z "$GODOT_BIN" ]; then
+            echo "::error::Godot calistirilabilir dosyasi bulunamadi."
+            exit 1
+          fi
+
+          sudo install -m 0755 "$GODOT_BIN" /usr/local/bin/godot
           godot --version
 
-      - name: Android export sablonlarini kur
+      - name: Android doku ayarini duzelt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          project_file = Path(os.environ["PROJECT_DIR"]) / "project.godot"
+          content = project_file.read_text(encoding="utf-8")
+          lines = content.splitlines()
+
+          section = "[rendering]"
+          setting = "textures/vram_compression/import_etc2_astc"
+
+          start = next(
+              (i for i, line in enumerate(lines)
+               if line.strip() == section),
+              None
+          )
+
+          if start is None:
+              lines.extend(["", section, setting + "=true"])
+          else:
+              end = next(
+                  (i for i in range(start + 1, len(lines))
+                   if re.match(r"^\s*\[.*\]\s*$", lines[i])),
+                  len(lines)
+              )
+
+              found = False
+              for i in range(start + 1, end):
+                  if re.match(
+                      r"^\s*" + re.escape(setting) + r"\s*=",
+                      lines[i]
+                  ):
+                      lines[i] = setting + "=true"
+                      found = True
+                      break
+
+              if not found:
+                  lines.insert(end, setting + "=true")
+
+          project_file.write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8"
+          )
+
+          print("Android ETC2/ASTC ayari etkinlestirildi.")
+          print("Ayar:", setting, "= true")
+          PY
+
+          grep -n "import_etc2_astc" "$PROJECT_DIR/project.godot"
+
+      - name: Android export sablonlarini indir
         shell: bash
         run: |
           set -euo pipefail
@@ -80,13 +143,36 @@ jobs:
             "${BASE}/Godot_v${VERSION}_export_templates.tpz" \
             -o templates.tpz
 
-          mkdir -p "$HOME/.local/share/godot/export_templates/4.7.2.stable"
-          mkdir templates-unpacked
-
+          mkdir -p templates-unpacked
           unzip -q templates.tpz -d templates-unpacked
 
-          cp -R templates-unpacked/templates/. \
-            "$HOME/.local/share/godot/export_templates/4.7.2.stable/"
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/${VERSION}"
+
+          mkdir -p "$TEMPLATE_DIR"
+          cp -R templates-unpacked/templates/. "$TEMPLATE_DIR/"
+
+          test -f "$TEMPLATE_DIR/android_debug.apk"
+          echo "Android export sablonlari hazir."
+
+      - name: Android export preset kontrolu
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          if [ ! -f export_presets.cfg ]; then
+            echo "::error::export_presets.cfg bulunamadi. Projede Android export preset'i olusturulmamis."
+            exit 1
+          fi
+
+          if ! grep -q 'name="Android"' export_presets.cfg; then
+            echo "::error::export_presets.cfg icinde adi Android olan preset bulunamadi."
+            echo "Mevcut preset adlari:"
+            grep 'name=' export_presets.cfg || true
+            exit 1
+          fi
+
+          echo "Android export preset bulundu."
 
       - name: Projeyi ice aktar
         shell: bash
@@ -107,11 +193,19 @@ jobs:
 
           godot --headless --path . \
             --export-debug "Android" \
-            build/KaranlikTac-debug.apk
+            build/KaranlikTac-debug.apk \
+            2>&1 | tee "$GITHUB_WORKSPACE/godot-export.log"
 
-          test -s build/KaranlikTac-debug.apk
+          if [ ! -s build/KaranlikTac-debug.apk ]; then
+            echo "::error::APK olusmadi veya dosya bos."
+            exit 1
+          fi
 
-      - name: APK dosyasini yayinla
+          echo "APK basariyla olusturuldu."
+          ls -lh build/KaranlikTac-debug.apk
+
+      - name: APK dosyasini yukle
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Karanlik-Tac-Android-APK
@@ -124,7 +218,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Karanlik-Tac-Hata-Kayitlari
-          path: godot-import.log
+          path: |
+            godot-import.log
+            godot-export.log
           if-no-files-found: ignore
           retention-days: 7
-
