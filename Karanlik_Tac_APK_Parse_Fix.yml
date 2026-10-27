@@ -1,0 +1,177 @@
+
+name: Karanlik Tac - APK Parse Fix
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_zip:
+        description: "Duzeltilmis proje ZIP dosyasinin adi"
+        required: true
+        default: "Karanlik_Tac_APK_Parse_Fix.zip"
+        type: string
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+env:
+  GODOT_VERSION: "4.7.2-stable"
+  GODOT_TEMPLATE_VERSION: "4.7.2.stable"
+
+jobs:
+  build-apk:
+    name: Godot kontrolu ve Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Depoyu indir
+        uses: actions/checkout@v4
+
+      - name: Proje ZIP dosyasini bul ve cikar
+        env:
+          REQUESTED_PROJECT_ZIP: ${{ inputs.project_zip }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_PATH="${REQUESTED_PROJECT_ZIP:-Karanlik_Tac_APK_Parse_Fix.zip}"
+
+          if [ ! -f "$ZIP_PATH" ]; then
+            echo "::error::ZIP bulunamadi: $ZIP_PATH"
+            find . -maxdepth 1 -type f -iname '*.zip'
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/game-source"
+          unzip -q "$ZIP_PATH" -d "$RUNNER_TEMP/game-source"
+
+          PROJECT_FILE="$(find "$RUNNER_TEMP/game-source" \
+            -type f -name project.godot -print -quit)"
+
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "::error::ZIP icinde project.godot yok"
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT_FILE")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          test -f "$PROJECT_DIR/export_presets.cfg"
+          test -f "$PROJECT_DIR/scripts/game.gd"
+          test -f "$PROJECT_DIR/scripts/siege_manager.gd"
+
+      - name: Java 17 kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Godot ve export sablonlarini kur
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE="https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}"
+
+          curl -fL --retry 3 --retry-all-errors \
+            "$BASE/Godot_v${GODOT_VERSION}_linux.x86_64.zip" \
+            -o godot.zip
+
+          unzip -q godot.zip -d godot-bin
+
+          GODOT_BIN="$(find godot-bin -type f \
+            -name 'Godot_v*_linux.x86_64' -print -quit)"
+
+          test -n "$GODOT_BIN"
+          sudo install -m 0755 "$GODOT_BIN" /usr/local/bin/godot
+
+          curl -fL --retry 3 --retry-all-errors \
+            "$BASE/Godot_v${GODOT_VERSION}_export_templates.tpz" \
+            -o templates.tpz
+
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_VERSION}"
+          mkdir -p templates
+          unzip -q templates.tpz -d templates
+
+          cp -R templates/templates/. \
+            "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_VERSION}/"
+
+          test -s "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_VERSION}/android_debug.apk"
+
+          echo "JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+          godot --version
+
+      - name: GDScript parse ve proje kontrolu
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          set +e
+          godot --headless --editor \
+            --path "$PROJECT_DIR" --quit 2>&1 | tee godot-import.log
+          STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$STATUS" -ne 0 ] || \
+            grep -Eiq 'SCRIPT ERROR:|Parse Error:|Failed to load script|Failed loading resource' godot-import.log; then
+            echo "::error::Godot kaynak kontrolu basarisiz. APK uretilmedi."
+            exit 1
+          fi
+
+      - name: Oyun baslangic testi
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          set +e
+          godot --headless --path "$PROJECT_DIR" \
+            --quit-after 180 2>&1 | tee godot-startup.log
+          STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$STATUS" -ne 0 ] || \
+            grep -Eiq 'SCRIPT ERROR:|Parse Error:|Failed to load script|Failed loading resource' godot-startup.log; then
+            echo "::error::Oyun baslangic testi basarisiz."
+            exit 1
+          fi
+
+      - name: Android APK olustur
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p build
+
+          godot --headless --path "$PROJECT_DIR" \
+            --export-debug "Android" \
+            "$GITHUB_WORKSPACE/build/KaranlikTac-debug.apk" \
+            2>&1 | tee godot-export.log
+
+          test -s build/KaranlikTac-debug.apk
+          unzip -t build/KaranlikTac-debug.apk | tail -n 2
+          sha256sum build/KaranlikTac-debug.apk > build/apk-sha256.txt
+
+      - name: Hata gunluklerini yukle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Karanlik-Tac-build-diagnostics
+          path: |
+            godot-import.log
+            godot-startup.log
+            godot-export.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: APK dosyasini yukle
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Karanlik-Tac-Android-APK
+          path: build/KaranlikTac-debug.apk
+          if-no-files-found: error
+          retention-days: 14
